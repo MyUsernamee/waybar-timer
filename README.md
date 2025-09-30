@@ -82,10 +82,10 @@ Notation: `<...>` are necessary arguments and `[...]` are optional arguments.
 
 The main commands of the script are :
 
-- #### `serve`
+- #### `serve [TIME_FORMAT]`
   This is the command you want to put in the startup script of your compositor.
   Make sure you start this server _before_ you start waybar.
-  It keeps the state of the timer and provides updates to all the clients who call `hook`.
+  It keeps the state of the timer and provides updates to all the clients who call `hook`. The `TIME_FORMAT` argument changes the returned time format. It can be either `s` for seconds, `m` for minutes (default), or `m:s` for a both minutes and seconds seperated by a colon. 
 
 - #### `hook`
   This is the command which you want to put in your waybar `exec` field.
