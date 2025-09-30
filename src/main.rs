@@ -5,6 +5,7 @@ use std::io::Write;
 use std::os::linux::net::SocketAddrExt;
 use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
+use std::str::FromStr;
 use time::{Duration, OffsetDateTime};
 
 /// The name of the "updates" socket in the abstract namespace.
@@ -46,6 +47,29 @@ trait World {
     fn togglepause(&mut self) -> Result<(), WorldError>;
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum TimeFormat {
+    Seconds,
+    Minutes,
+    MinutesSeconds,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+struct ParseTimeFormatError;
+
+impl FromStr for TimeFormat {
+    type Err = ParseTimeFormatError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "s" => Ok( TimeFormat::Seconds ),
+            "m" => Ok( TimeFormat::Minutes ),
+            "m:s" => Ok( TimeFormat::MinutesSeconds ),
+            _ => Err(ParseTimeFormatError)
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Timer {
     Idle,
@@ -59,9 +83,19 @@ enum Timer {
     },
 }
 
+impl TimeFormat {
+    fn format_minutes_and_seconds(self, seconds: i64) -> String {
+        match self {
+            TimeFormat::Seconds => format!("{}", seconds),
+            TimeFormat::Minutes => format!("{}", ((seconds as f64) / 60.0).ceil() as i64), 
+            TimeFormat::MinutesSeconds => format!("{:02}:{:02}",seconds / 60, seconds % 60),
+        }
+    }
+}
+
 impl Timer {
-    /// updates timer, potentially executes action, and returns formatted string for waybar
-    fn update(&mut self) -> String {
+    /// updates timer, potentially executes action, and returns a string of the remaining time formatted in the given time format for waybar
+    fn update(&mut self, time_format: TimeFormat) -> String {
         let now = OffsetDateTime::now_local().unwrap();
 
         // check if timer expired
@@ -81,17 +115,17 @@ impl Timer {
 
         // print new output to stdout (for waybar)
         let (text, alt, tooltip) = match self {
-            Self::Idle => (0, "standby", "No timer set".into()),
+            Self::Idle => (time_format.format_minutes_and_seconds(0), "standby", "No timer set".into()),
             Self::Running { expiry, .. } => {
                 let time_left = *expiry - now;
-                let minutes_left = time_left.whole_minutes() + 1;
+                let seconds_left = time_left.whole_seconds() + 1;
                 let tooltip = Self::tooltip(expiry);
-                (minutes_left, "running", tooltip)
+                (time_format.format_minutes_and_seconds(seconds_left), "running", tooltip)
             }
             Self::Paused { time_left, .. } => {
-                let minutes_left = time_left.whole_minutes() + 1;
+                let seconds_left = time_left.whole_seconds() + 1;
                 let tooltip = "Timer paused".into();
-                (minutes_left, "paused", tooltip)
+                (time_format.format_minutes_and_seconds(seconds_left), "paused", tooltip)
             }
         };
         format!("{{\"text\": \"{text}\", \"alt\": \"{alt}\", \"tooltip\": \"{tooltip}\", \"class\": \"timer\"}}")
@@ -175,7 +209,9 @@ impl World for Timer {
 #[derive(Parser)]
 enum Args {
     /// Serve a timer API (should be called once at compositor startup)
-    Serve,
+    Serve {
+        time_format: Option<String>
+    },
     /// Keep reading the latest status of the timer (should be called by waybar)
     Hook,
     /// Start a new timer
@@ -196,12 +232,13 @@ enum Args {
 struct ServerState {
     timer: Timer,
     subs: Vec<UnixStream>,
+    time_format: TimeFormat,
 }
 
 impl ServerState {
     fn update(&mut self) {
         // update timer and get waybar string
-        let message = self.timer.update();
+        let message = self.timer.update(self.time_format);
 
         // broadcast it to subscribers
         let mut i: usize = 0;
@@ -224,10 +261,11 @@ impl ServerState {
     }
 }
 
-fn run_serve() {
+fn run_serve(time_format: TimeFormat) {
     let state = Arc::new(Mutex::new(ServerState {
         timer: Timer::Idle,
         subs: Vec::new(),
+        time_format
     }));
 
     // spawn a thread which is responsible for calling update in a regular interval
@@ -286,8 +324,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let socket_addr_commands = SocketAddr::from_abstract_name(SOCKET_NAME_COMMANDS).unwrap();
     let args = Args::parse();
     match args {
-        Args::Serve => {
-            run_serve();
+        Args::Serve {time_format} => {
+            let time_format : TimeFormat = match time_format {
+                Some(time_format_string) => TimeFormat::from_str(time_format_string.as_str()).expect("Invalid time format string. Please choose either s, m, or m:s"),
+                None => TimeFormat::Minutes,
+            };
+            run_serve(time_format);
             Ok(())
         }
         Args::Hook => {
